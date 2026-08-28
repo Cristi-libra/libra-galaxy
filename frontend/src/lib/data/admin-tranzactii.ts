@@ -1,7 +1,7 @@
 import { backendFetch } from "@/lib/backend";
 import type {
   ContSemnalat,
-  StareCarduri,
+  StareConturi,
   StareCont,
   Raport,
   StareDetectie,
@@ -44,6 +44,26 @@ export async function obtineStareCont(
   );
 }
 
-export async function obtineStareCarduriToti(token: string): Promise<StareCarduri[]> {
-  return backendFetch<StareCarduri[]>("api/v1/admin/stare-carduri", token);
+export async function obtineStareConturiToti(token: string): Promise<StareConturi[]> {
+  return backendFetch<StareConturi[]>("api/v1/admin/stare-conturi", token);
+}
+
+export type SesizareSuport = {
+  id: string;
+  id_utilizator: string;
+  subiect: string;
+  rezumat: string;
+  status: string;
+  raspuns: string | null;
+  creat_la: string;
+};
+
+export async function obtineCoadaSesizari(
+  token: string,
+  doarDeschise = true,
+): Promise<SesizareSuport[]> {
+  return backendFetch<SesizareSuport[]>(
+    `api/v1/suport/coada?doar_deschise=${doarDeschise}`,
+    token,
+  );
 }

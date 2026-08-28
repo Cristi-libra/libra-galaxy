@@ -23,11 +23,45 @@ export type TranzactieAfisata = {
   creatLa: string;
   tip: "trimisa" | "primita";
   contraparte: Contraparte | null;
+  /**
+   * Numele de afisat pentru celalalt participant, calculat o singura data aici.
+   *
+   * Cand contrapartea lipseste sunt doua cazuri diferite, care arata la fel in
+   * date: contul a fost sters, sau tranzactia n-a avut niciodata o persoana
+   * dincolo (miscari de sistem, depuneri). Le distinge marcajul pus de
+   * migratia 0034 la stergerea profilului — fara el, cele 504 miscari de
+   * sistem existente ar fi aparut toate ca "Cont sters".
+   */
+  numeContraparte: string;
   /** Mutare intre doua conturi ale aceleiasi persoane — nu a plecat niciun ban. */
   intreConturiProprii: boolean;
+  /**
+   * Contul TAU implicat: cel din care au plecat banii la o trimitere, cel in
+   * care au intrat la o primire.
+   *
+   * De cand un om poate avea mai multe conturi, „Trimis catre Andrei · 200 RON"
+   * nu spune din care buzunar. `null` cand miscarea n-a atins un cont al tau
+   * (depuneri in grup, miscari de sistem) sau cand contul a fost intre timp
+   * sters.
+   */
+  numeContPropriu: string | null;
+  /**
+   * Celalalt capat, dar tot al tau — completat DOAR la mutarile intre conturile
+   * proprii (consolidarea dinaintea inchiderii contului, migratia 0037). Acolo
+   * „Expeditor: tu / Beneficiar: tu" nu spune nimic, iar singura informatie
+   * reala a miscarii sunt cele doua conturi.
+   */
+  numeContCelalalt: string | null;
   /** Setat doar la miscarile care ating soldul unui grup. */
   grup: GrupTranzactie | null;
+  /**
+   * Starea din 0043. `normala` acopera tot ce trece prin core_banking; celelalte
+   * apar doar la transferurile oprite de scanerul de cuvinte sensibile.
+   */
+  status: StatusTranzactie;
 };
+
+export type StatusTranzactie = "normala" | "flagged" | "acceptata" | "anulata";
 
 /**
  * Tranzactiile in care utilizatorul curent e expeditor sau destinatar, cele mai
@@ -44,21 +78,54 @@ export async function obtineTranzactiiUtilizator(
 
   if (!user) return [];
 
-  let cerere = supabase
-    .from("tranzactii")
-    .select(
-      "id, suma, valuta, descriere, creat_la, id_user_send, id_user_recieve, id_group_send, id_group_recieve",
-    )
-    .or(`id_user_send.eq.${user.id},id_user_recieve.eq.${user.id}`)
-    .order("creat_la", { ascending: false });
+  const COLOANE_DE_BAZA =
+    "id, suma, valuta, descriere, creat_la, id_user_send, id_user_recieve, " +
+    "id_group_send, id_group_recieve, id_cont_send, id_cont_recieve";
 
-  if (limita) cerere = cerere.limit(limita);
+  function interogheaza(coloane: string) {
+    const cerere = supabase
+      .from("tranzactii")
+      .select(coloane)
+      .or(`id_user_send.eq.${user!.id},id_user_recieve.eq.${user!.id}`)
+      .order("creat_la", { ascending: false });
 
-  const { data, error } = await cerere;
+    return limita ? cerere.limit(limita) : cerere;
+  }
+
+  // Coloanele vin din migratii aplicate manual pe Supabase cloud, deci pot lipsi
+  // una cate una. Se coboara treapta cu treapta, ca lipsa lui `status` (0043) sa
+  // nu arunce si marcajele de cont sters (0034) — nu e un motiv sa pice
+  // dashboardul si istoricul.
+  const lipsesteColoana = (cod?: string) => cod === "42703" || cod === "PGRST204";
+
+  let { data, error } = await interogheaza(
+    `${COLOANE_DE_BAZA}, send_sters, recieve_sters, status`,
+  );
+
+  if (error && lipsesteColoana(error.code)) {
+    ({ data, error } = await interogheaza(`${COLOANE_DE_BAZA}, send_sters, recieve_sters`));
+  }
+
+  if (error && lipsesteColoana(error.code)) {
+    ({ data, error } = await interogheaza(COLOANE_DE_BAZA));
+  }
 
   if (error) throw error;
 
-  const randuri = data ?? [];
+  // `select()` cu un sir construit dinamic nu-i mai da lui supabase-js forma
+  // randului, deci tipul se pune aici.
+  const toate = (data ?? []) as unknown as Array<Record<string, unknown>>;
+
+  // Un transfer oprit sau anulat nu a ajuns niciodata in contul beneficiarului,
+  // deci nu are ce cauta in istoricul lui: ar arata ca bani primiti care nu se
+  // vad in sold. Expeditorul il vede in continuare — lui i-au plecat banii — cu
+  // starea afisata langa el.
+  const randuri = toate.filter(
+    (t) =>
+      t.id_user_send === user.id ||
+      (t.status ?? "normala") === "normala" ||
+      t.status === "acceptata",
+  );
 
   const idContraparti = [
     ...new Set(
@@ -103,6 +170,19 @@ export async function obtineTranzactiiUtilizator(
     ),
   ];
 
+  // Numele propriilor conturi, pentru „din contul / in contul". Sunt ale
+  // utilizatorului curent, deci RLS le da fara service_role.
+  const numeConturi = new Map<string, string>();
+
+  const { data: conturiProprii } = await supabase
+    .from("conturi_bancare")
+    .select("id, nume")
+    .eq("id_user", user.id);
+
+  for (const cont of conturiProprii ?? []) {
+    numeConturi.set(cont.id as string, cont.nume as string);
+  }
+
   const numeGrupuri = new Map<number, string>();
 
   if (idGrupuri.length) {
@@ -142,6 +222,11 @@ export async function obtineTranzactiiUtilizator(
         ? { id: `grup-${grup.id}`, nume: grup.nume, avatarUrl: null }
         : (contraparti.get(idContraparte as string) ?? null);
 
+    // Marcajul e pe partea CEALALTA decat cea a utilizatorului curent.
+    const contrapartaStearsa = trimisa
+      ? Boolean(tranzactie.recieve_sters)
+      : Boolean(tranzactie.send_sters);
+
     return {
       id: tranzactie.id as string,
       suma: Number(tranzactie.suma),
@@ -150,11 +235,47 @@ export async function obtineTranzactiiUtilizator(
       creatLa: tranzactie.creat_la as string,
       tip: trimisa ? ("trimisa" as const) : ("primita" as const),
       contraparte,
+      numeContraparte:
+        contraparte?.nume ?? (contrapartaStearsa ? "Cont șters" : "Cont Galaxy Bank"),
       // O plata din grup catre propriul cont are acelasi om la ambele capete,
       // dar nu e o mutare intre conturile tale: banii au venit din punga comuna.
       intreConturiProprii:
         !grup && tranzactie.id_user_send === tranzactie.id_user_recieve,
+      numeContPropriu:
+        numeConturi.get(
+          (trimisa ? tranzactie.id_cont_send : tranzactie.id_cont_recieve) as string,
+        ) ?? null,
+      numeContCelalalt:
+        numeConturi.get(
+          (trimisa ? tranzactie.id_cont_recieve : tranzactie.id_cont_send) as string,
+        ) ?? null,
       grup,
+      status: ((tranzactie.status as string | null) ?? "normala") as StatusTranzactie,
     };
   });
+}
+
+/**
+ * Persoanele reale (cont Galaxy Bank) cu care ai mai facut o tranzactie
+ * directa — baza pentru "invita direct" la un grup. Orice contraparte de aici
+ * are garantat un cont real: `tranzactii` inregistreaza doar transferuri
+ * interne (core_banking cere un cont Libra existent dupa IBAN, altfel
+ * respinge operatia inainte sa scrie randul) — nu exista transfer catre alta
+ * banca in acest tabel. Nicio interogare noua: reutilizeaza
+ * obtineTranzactiiUtilizator si dedupica contrapartile in memorie.
+ */
+export async function obtineContrapartiRecente(limita = 30): Promise<Contraparte[]> {
+  const tranzactii = await obtineTranzactiiUtilizator(200);
+
+  const contraparti = new Map<string, Contraparte>();
+
+  for (const tranzactie of tranzactii) {
+    // Depunerile in grup au drept "contraparte" grupul insusi (id `grup-...`),
+    // nu o persoana reala — nu poate fi invitat.
+    if (tranzactie.contraparte && !tranzactie.contraparte.id.startsWith("grup-")) {
+      contraparti.set(tranzactie.contraparte.id, tranzactie.contraparte);
+    }
+  }
+
+  return [...contraparti.values()].slice(0, limita);
 }

@@ -1,6 +1,9 @@
+from datetime import datetime
+from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ContSemnalatResponse(BaseModel):
@@ -73,7 +76,7 @@ class AnalizaRequest(BaseModel):
 class AnalizaResponse(BaseModel):
     decizie: str
     observatie: str | None = None
-    carduri_atinse: int
+    conturi_atinse: int
     notificare_trimisa: bool
     creat_la: str
 
@@ -84,26 +87,210 @@ class IstoricAnalizaResponse(BaseModel):
     observatie: str | None = None
     gravitate: int | None = None
     numar_semnalari: int | None = None
-    carduri_blocate: int
+    conturi_blocate: int
     creat_la: str
 
 
 class StareContResponse(BaseModel):
     """Istoricul deciziilor plus starea reala a cardurilor.
 
-    Starea nu se deduce din ultima decizie: clientul isi poate bloca si debloca
-    singur cardurile din aplicatie, deci istoricul administratorului nu e
-    singura sursa de adevar.
+    Starea nu se deduce din ultima decizie: un administrator poate bloca sau
+    debloca oricand, iar istoricul unei singure analize nu spune unde s-a ajuns.
     """
 
-    carduri_total: int
-    carduri_blocate: int
+    conturi_total: int
+    conturi_blocate: int
     analize: list[IstoricAnalizaResponse]
 
 
-class StareCarduriResponse(BaseModel):
-    """Cate carduri are un om si cate ii sunt blocate."""
+class StareConturiResponse(BaseModel):
+    """Cate conturi are un om si cate ii sunt blocate administrativ."""
 
     id_utilizator: str
     total: int
     blocate: int
+
+
+class ContClientResponse(BaseModel):
+    nume: str | None = None
+    sold: str
+    valuta: str | None = None
+    blocat: bool = False
+
+
+class CerereStergereAdminResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: UUID
+    id_utilizator: UUID
+    nume: str | None = None
+    email: str | None = None
+    motiv: str | None = None
+    status: str
+    creat_la: datetime
+    decis_la: datetime | None = None
+    motiv_refuz: str | None = None
+    conturi: list[ContClientResponse] = []
+    credite_in_derulare: int = 0
+
+
+class DecizieStergereRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aproba: bool
+    motiv: str | None = Field(default=None, max_length=500)
+
+
+# -----------------------------------------------------------------------------
+# Inchiderea unui CONT BANCAR (nu a relatiei cu banca)
+# -----------------------------------------------------------------------------
+
+
+class ContAdminResponse(BaseModel):
+    """Un cont, asa cum il vede analistul: si cel care se inchide, si cele care
+    pot primi banii. O singura forma pentru amandoua, ca sa arate la fel."""
+
+    id: UUID
+    nume: str | None = None
+    sold: str
+    valuta: str | None = None
+    blocat: bool = False
+    inchis: bool = False
+    este_principal: bool = False
+
+
+class CardInchisResponse(BaseModel):
+    id: UUID
+    ultimele4: str
+    tip: str | None = None
+
+
+class CerereInchidereContResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: UUID
+    id_utilizator: UUID
+    id_cont: UUID
+    id_cont_destinatie: UUID | None = None
+    nume: str | None = None
+    email: str | None = None
+    motiv: str | None = None
+    status: str
+    creat_la: datetime
+    decis_la: datetime | None = None
+    motiv_refuz: str | None = None
+
+    cont: ContAdminResponse | None = None
+    # Doar conturile deschise, altele decat cel care se inchide. Lista vine gata
+    # filtrata din depozit: mai bine lipsesc optiunile imposibile decat sa fie
+    # afisate dezactivate.
+    destinatii: list[ContAdminResponse] = []
+    carduri: list[CardInchisResponse] = []
+
+
+class DecizieInchidereRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aproba: bool
+    # Lipsa inseamna „automat": RPC-ul cade pe propunerea clientului, iar daca
+    # nici ea nu exista, pe contul principal.
+    id_cont_destinatie: UUID | None = None
+    motiv: str | None = Field(default=None, max_length=500)
+
+
+# -----------------------------------------------------------------------------
+# Popriri
+#
+# Alta operatiune decat blocarea contului, si nu trebuie confundata cu ea:
+# blocarea opreste TOT ce pleaca dintr-un cont, poprirea indisponibilizeaza o
+# SUMA pe toate conturile clientului. Pot fi si amandoua deodata.
+# -----------------------------------------------------------------------------
+
+
+class PoprireResponse(BaseModel):
+    """Un dosar de poprire, asa cum il vede analistul.
+
+    ATENTIE la sumele ca text: acelasi camp vine in DOUA forme, dupa drum.
+    PostgREST serializeaza `numeric` ca SIR cand citesti tabela, dar ca NUMAR
+    cand il intoarce un RPC. Prima varianta a acestui model declara doar `str`,
+    si efectul era exact pe dos decat cel util: lista mergea (era goala), iar
+    instituirea unei popriri dadea 500 DUPA ce RPC-ul scrisese deja randul in
+    baza — adica omul primea „eroare" si o poprire reala pe cont.
+
+    Normalizarea sta aici, intr-un singur loc, si nu in cele patru rute: e
+    singurul punct prin care trec amandoua formele.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: UUID
+    id_utilizator: UUID
+    creditor: str
+    dosar: str | None = None
+    suma_totala: str
+    suma_incasata: str
+    valuta: str = "RON"
+    status: str
+    creat_la: datetime
+    incheiat_la: datetime | None = None
+    observatie: str | None = None
+
+    # Vin din alaturarea facuta in depozit, ca analistul sa nu ceara a doua oara.
+    nume: str | None = None
+    email: str | None = None
+    # Soldul cumulat al clientului, in RON. Fara el, „mai are de platit 5000" nu
+    # spune daca poprirea se poate incasa azi sau nu.
+    disponibil: str | None = None
+
+    @field_validator("suma_totala", "suma_incasata", "disponibil", mode="before")
+    @classmethod
+    def _bani_ca_text(cls, valoare: object) -> object:
+        """Orice ar veni — sir, float, Decimal — iese „1234.50".
+
+        Trecerea prin `Decimal(str(...))` si nu prin `float` e intentionata: pe
+        bani nu se face aritmetica in virgula mobila nicaieri in proiectul asta.
+        """
+        if valoare is None or isinstance(valoare, str):
+            return valoare
+        if isinstance(valoare, (int, float, Decimal)):
+            return str(Decimal(str(valoare)).quantize(Decimal("0.01")))
+        return valoare
+
+
+class InstituiePoprireRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id_utilizator: UUID
+    creditor: str = Field(min_length=2, max_length=200)
+    suma: Decimal = Field(gt=0)
+    dosar: str | None = Field(default=None, max_length=100)
+    observatie: str | None = Field(default=None, max_length=2000)
+
+
+class IncaseazaPoprireRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Lipsa inseamna „cat se poate acum" — forma folosita in practica, fiindca
+    # banii pica in transe.
+    suma: Decimal | None = Field(default=None, gt=0)
+
+
+class RidicaPoprireRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    motiv: str | None = Field(default=None, max_length=500)
+
+
+class StorneazaPoprireRequest(BaseModel):
+    """Reverse-ul unei incasari: banii virati se intorc la client.
+
+    Nu e acelasi lucru cu ridicarea. Ridicarea opreste poprirea; stornarea aduce
+    banii inapoi. O poprire pusa gresit si deja incasata cere amandoua, in
+    ordinea asta.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Lipsa inseamna „tot ce s-a incasat".
+    suma: Decimal | None = Field(default=None, gt=0)
+    motiv: str | None = Field(default=None, max_length=500)

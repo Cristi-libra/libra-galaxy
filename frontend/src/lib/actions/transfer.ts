@@ -1,14 +1,21 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { BANCA_INTERNA, type BeneficiarTransfer } from "@/lib/data/transfer";
+import { cautaContDupaIban, type BeneficiarTransfer } from "@/lib/data/transfer";
 import { ibanEsteValid } from "@/lib/iban";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { contEsteBlocat, MESAJ_CONT_BLOCAT } from "@/lib/cont-blocat";
+import { ipCerere } from "@/lib/ip-cerere";
+import { scaneazaTransfer } from "@/lib/cuvinte-sensibile";
 import { createClient } from "@/lib/supabase/server";
+import { formateazaSuma } from "@/lib/utils";
 
 export type RezultatCautareBeneficiar = { beneficiar?: BeneficiarTransfer; eroare?: string };
-export type RezultatTransfer = { eroare?: string };
+export type RezultatTransfer = {
+  eroare?: string;
+  /** Transferul a fost oprit de scanerul de cuvinte si asteapta un administrator. */
+  semnalat?: boolean;
+};
 
 function normalizeazaIban(iban: string) {
   return iban.replace(/\s+/g, "").toUpperCase();
@@ -35,31 +42,18 @@ export async function cautaBeneficiarDupaIban(
 
   if (!ibanEsteValid(iban)) return { eroare: "IBAN invalid." };
 
-  const supabaseAdmin = createAdminClient();
+  try {
+    // Un cont propriu ramane o destinatie valida: se pot muta bani intre
+    // conturile aceleiasi persoane. Doar acelasi cont e respins, in RPC.
+    const beneficiar = await cautaContDupaIban(iban);
 
-  // IBAN-ul identifica un cont, nu un om (0007_conturi_bancare.sql).
-  const { data, error } = await supabaseAdmin
-    .from("conturi_bancare")
-    .select("id, iban, id_user, profiles ( nume )")
-    .eq("iban", iban)
-    .maybeSingle();
+    if (!beneficiar) return { eroare: "Nu exista niciun cont Galaxy Bank cu acest IBAN." };
 
-  if (error) return { eroare: "Nu am putut cauta beneficiarul. Incearca din nou." };
-  if (!data) return { eroare: "Nu exista niciun cont Galaxy Bank cu acest IBAN." };
-
-  const relatie = data.profiles as { nume: string } | { nume: string }[] | null;
-  const proprietar = Array.isArray(relatie) ? relatie[0] : relatie;
-
-  return {
-    beneficiar: {
-      id: data.id as string,
-      // Un cont propriu ramane o destinatie valida: se pot muta bani intre
-      // conturile aceleiasi persoane. Doar acelasi cont e respins, in RPC.
-      nume: proprietar?.nume ?? "Cont Galaxy Bank",
-      iban: data.iban as string,
-      banca: BANCA_INTERNA,
-    },
-  };
+    return { beneficiar };
+  } catch (exc) {
+    console.error("ERROR cautaBeneficiarDupaIban:", exc);
+    return { eroare: "Nu am putut cauta beneficiarul. Incearca din nou." };
+  }
 }
 
 /**
@@ -78,12 +72,56 @@ const MESAJE_CORE_BANKING: Record<string, string> = {
   CONT_SURSA_STRAIN: "Nu poti plati dintr-un cont care nu este al tau.",
   AUTOTRANSFER: "Nu poti trimite bani in acelasi cont din care platesti.",
   FONDURI_INSUFICIENTE: "Nu ai fonduri suficiente in cont.",
+  // Ridicat de trigger-ul din 0047. Nu e acelasi lucru cu FONDURI_INSUFICIENTE:
+  // banii SUNT in cont, dar o parte din ei sunt indisponibilizati printr-o
+  // poprire. Un mesaj de „fonduri insuficiente" ar trimite omul sa-si caute
+  // banii care se vad pe ecran.
+  POPRIRE_ACTIVA:
+    "O parte din banii tăi sunt indisponibilizați printr-o poprire, iar suma cerută îi depășește pe cei disponibili.",
   // Ridicate de core_banking_groups (0009_core_banking_groups.sql).
   GRUP_INEXISTENT: "Grupul nu exista.",
   NU_ESTI_MEMBRU: "Nu faci parte din acest grup.",
   FONDURI_INSUFICIENTE_GRUP: "Grupul nu are fonduri suficiente.",
   DIRECTIE_INVALIDA: "Nu am putut trimite banii. Incearca din nou.",
 };
+
+/**
+ * Cat tine poprirea blocat, scos din `details`-ul refuzului.
+ *
+ * core_banking scrie acolo o propozitie intreaga, in limbaj de banca ("...din
+ * conturile acestui client"), din care clientului ii foloseste doar cifra.
+ * Fara potrivire, apelantul cade pe mesajul fix — niciodata pe textul brut.
+ */
+function sumaBlocata(detalii: string | null | undefined) {
+  const gasit = /([0-9]+(?:[.,][0-9]{1,2})?)\s*([A-Z]{3})/.exec(detalii ?? "");
+
+  if (!gasit) return null;
+
+  const suma = Number(gasit[1].replace(",", "."));
+
+  return Number.isFinite(suma) ? formateazaSuma(suma, gasit[2]) : null;
+}
+
+/**
+ * Mesajul pentru un refuz venit din core_banking.
+ *
+ * Popririle se trateaza aparte, din doua motive: suma blocata difera de la un
+ * client la altul, deci merita spusa (altfel omul vede soldul intreg pe ecran
+ * si un refuz care pare arbitrar), iar familia de coduri poate creste in baza
+ * fara ca aplicatia sa fie redeployata — orice `POPRIRE_*` nou primeste macar
+ * explicatia corecta, nu „incearca din nou".
+ */
+function mesajCoreBanking(error: { message: string; details?: string | null }) {
+  if (error.message?.startsWith("POPRIRE")) {
+    const blocat = sumaBlocata(error.details);
+
+    return blocat
+      ? `O poprire tine indisponibila suma de ${blocat}. Poti trimite doar ce ramane peste ea.`
+      : MESAJE_CORE_BANKING.POPRIRE_ACTIVA;
+  }
+
+  return MESAJE_CORE_BANKING[error.message];
+}
 
 /**
  * Muta bani din contul propriu in contul beneficiarului (dupa IBAN) si scrie
@@ -128,10 +166,27 @@ export async function trimiteTransfer(input: {
 
   const descriere = input.detalii.trim() || null;
 
+  // Scanarea se face inainte de miscarea banilor, nu dupa: un transfer semnalat
+  // nu ajunge niciodata la beneficiar, deci nu e nevoie sa fie stornat. Lista de
+  // cuvinte vine din cache (lib/cuvinte-sensibile.ts), asa ca de obicei nu costa
+  // nicio interogare in plus.
+  const cuvinteGasite = await scaneazaTransfer(descriere);
+
   // Doua functii, aceleasi garantii: banii din punga comuna pleaca prin
   // core_banking_groups, care verifica in plus ca esti membru al grupului.
-  const { error } =
-    input.idGrupSursa != null
+  // Cand descrierea a fost semnalata, ambele drumuri trec prin
+  // transfer_semnalat: debiteaza sursa si lasa suma in asteptare (0043).
+  const { data, error } = cuvinteGasite.length
+    ? await supabaseAdmin.rpc("transfer_semnalat", {
+        p_id_user: user.id,
+        p_iban_dest: iban,
+        p_suma: suma,
+        p_descriere: descriere,
+        p_id_cont_send: input.idGrupSursa != null ? null : (input.idContSursa ?? null),
+        p_id_grup_send: input.idGrupSursa ?? null,
+        p_cuvinte: cuvinteGasite,
+      })
+    : input.idGrupSursa != null
       ? await supabaseAdmin.rpc("core_banking_groups", {
           p_id_group: input.idGrupSursa,
           p_suma: suma,
@@ -149,12 +204,28 @@ export async function trimiteTransfer(input: {
         });
 
   if (error) {
-    const mesaj = MESAJE_CORE_BANKING[error.message];
+    const mesaj = mesajCoreBanking(error);
 
     // Orice altceva (functia lipseste, deadlock, retea) — log si mesaj generic.
     if (!mesaj) console.error("ERROR trimiteTransfer:", error);
 
     return { eroare: mesaj ?? "Nu am putut trimite banii. Incearca din nou." };
+  }
+
+  // De unde a plecat transferul. Se scrie dupa, nu ca parametru al RPC-urilor:
+  // sunt trei functii diferite, toate ale altor fluxuri, si un parametru in plus
+  // ar fi insemnat sa le rescriu pe toate trei.
+  //
+  // Banii au plecat deja. Un esec aici pierde un semnal de detectie, nu o
+  // tranzactie, deci nu intoarce eroare catre om.
+  try {
+    const ip = await ipCerere();
+    const idTranzactie = (data as { id_tranzactie?: string } | null)?.id_tranzactie;
+    if (ip && idTranzactie) {
+      await supabaseAdmin.from("tranzactii").update({ ip }).eq("id", idTranzactie);
+    }
+  } catch (exc) {
+    console.error("nu am putut nota IP-ul transferului:", exc);
   }
 
   revalidatePath("/dashboard");
@@ -168,5 +239,7 @@ export async function trimiteTransfer(input: {
     revalidatePath(`/grupuri/${input.idGrupSursa}`);
   }
 
-  return {};
+  // Nu se spune care cuvant a declansat verificarea: ar transforma formularul
+  // intr-un instrument de ghicit lista administratorului.
+  return { semnalat: cuvinteGasite.length > 0 };
 }

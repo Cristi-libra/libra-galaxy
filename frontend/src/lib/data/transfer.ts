@@ -8,7 +8,7 @@ import { createClient } from "@/lib/supabase/server";
  * destinatia sunt conturi bancare: utilizatorul alege din care dintre conturile
  * lui plateste, iar IBAN-ul introdus identifica un cont al beneficiarului.
  *
- * De la 0009_core_banking_groups.sql sursa poate fi si soldul unui grup din
+ * De la functia core_banking_groups (vezi 0000_instantaneu_inainte_de_credite.sql) sursa poate fi si soldul unui grup din
  * care faci parte — destinatia ramane mereu un cont, dupa IBAN.
  */
 
@@ -24,6 +24,8 @@ export type ContSursa = {
   sold: number;
   valuta: string;
   blocat: boolean;
+  /** Contul deschis odata cu profilul. Fals mereu la grupuri. */
+  estePrincipal: boolean;
   tip: "cont" | "grup";
 };
 
@@ -54,10 +56,14 @@ export async function obtineConturiTransfer(): Promise<ContSursa[]> {
       nume: cont.nume,
       numarMascat: cont.ibanMascat,
       sold: cont.sold,
-      // Contul isi are propria valuta de la 0013_schimb_valutar.sql; suma
+      // Contul isi are propria valuta de la 0019_schimb_valutar_suma.sql; suma
       // introdusa in formular se interpreteaza in valuta sursei.
       valuta: cont.valuta,
-      blocat: false,
+      // Din `cont.blocatDeBanca`, nu `false`: un cont inghetat administrativ
+      // aparea aici ca oricare altul, iar omul afla ca nu poate trimite abia
+      // cand RPC-ul raspundea CONT_BLOCAT, dupa ce completase tot formularul.
+      blocat: cont.blocatDeBanca,
+      estePrincipal: cont.estePrincipal,
       tip: "cont" as const,
     })),
     ...grupuri.map((grup) => ({
@@ -68,9 +74,47 @@ export async function obtineConturiTransfer(): Promise<ContSursa[]> {
       // Punga comuna a unui grup ramane in RON, oricare ar fi conturile membrilor.
       valuta: VALUTA_IMPLICITA,
       blocat: false,
+      estePrincipal: false,
       tip: "grup" as const,
     })),
   ];
+}
+
+/**
+ * Contul cu IBAN-ul dat, ca beneficiar de transfer. Null daca nu exista.
+ *
+ * IBAN-ul identifica un cont, nu un om (tabela conturi_bancare). Conturile si
+ * profilurile altora nu se pot citi cu cheia anon (RLS), deci cautarea merge cu
+ * service_role — dar intoarce strict numele si IBAN-ul contului cautat, adica
+ * exact ce vede oricum cel care e pe cale sa-i trimita bani.
+ *
+ * Se foloseste si de actiunea „beneficiar nou" din formular, si de linkul dintr-un
+ * cod QR, unde beneficiarul poate fi cineva cu care n-ai mai avut de-a face.
+ */
+export async function cautaContDupaIban(ibanBrut: string): Promise<BeneficiarTransfer | null> {
+  const iban = ibanBrut.replace(/\s+/g, "").toUpperCase();
+
+  const supabaseAdmin = createAdminClient();
+
+  const { data, error } = await supabaseAdmin
+    .from("conturi_bancare")
+    .select("id, iban, profiles ( nume )")
+    .eq("iban", iban)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  // PostgREST intoarce relatia ca obiect sau ca lista, dupa cum o deduce.
+  const relatie = data.profiles as { nume: string } | { nume: string }[] | null;
+  const proprietar = Array.isArray(relatie) ? relatie[0] : relatie;
+
+  return {
+    id: data.id as string,
+    nume: proprietar?.nume ?? "Cont Galaxy Bank",
+    iban: data.iban as string,
+    banca: BANCA_INTERNA,
+  };
 }
 
 /**

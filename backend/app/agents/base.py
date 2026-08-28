@@ -31,9 +31,27 @@ CONFIDENCE_LOW = "scazut"
 
 
 @dataclass(frozen=True)
+class ActiunePropusa:
+    """Ceva ce asistentul propune, dar nu face.
+
+    Agentii nu au voie sa schimbe nimic (docs/AGENTS.md): tool-urile lor sunt
+    read-only sau, cel mult, `PREPARES_MUTATION`. Cand un raspuns are nevoie de
+    o urmare — trimiterea unei sesizari catre banca, de exemplu — el pregateste
+    continutul si il descrie aici, iar interfata arata un buton. Apasarea e a
+    omului; asistentul doar ii pune lucrul la indemana.
+    """
+
+    tip: str
+    eticheta: str
+    rezumat: str
+    context: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AgentAnswer:
     text: str
     citations: list[dict] = field(default_factory=list)
+    actiune: ActiunePropusa | None = None
     confidence: str | None = None
     tokens_in: int = 0
     tokens_out: int = 0
@@ -76,14 +94,57 @@ def build_system_prompt(spec: AgentSpec, context: AssembledContext) -> str:
         f"sau engleza) — niciodata in ambele, niciodata cu o traducere sau o sectiune "
         f"suplimentara in cealalta limba. Cifrele raman cifre (500, 12,5%), nu se scriu literal.\n"
         f"Nu afirmi niciodata ca o actiune a reusit decat daca un tool a confirmat asta.\n"
-        f"Nu mentiona in raspuns numele tool-urilor, ID-uri de documente sau cuvinte precum "
-        f"'sursa:'/'conform datelor din'/'get_...' — utilizatorul vede doar continutul, "
-        f"niciodata mecanismul intern prin care a fost obtinut (nivelul de incredere e "
-        f"calculat separat, determinist, nu de tine).\n"
+        f"Daca intrebarea nu are nicio legatura cu domeniul bancar (o gluma, o curiozitate "
+        f"generala, orice subiect fara legatura cu banii sau banca) spui simplu ca poti ajuta "
+        f"doar cu intrebari despre domeniul bancar — nu incerci sa raspunzi la subiect, chiar "
+        f"daca vreun rezultat de tool contine din intamplare cuvinte comune cu intrebarea.\n"
+        f"Daca utilizatorul intreaba despre o ALTA persoana — daca e client al bancii, daca are "
+        f"cont, orice date personale ale ei — refuzi clar si scurt, spunand ca nu poti oferi "
+        f"informatii despre alte persoane sau alti clienti, INDIFERENT daca informatia respectiva "
+        f"exista sau nu in ce ai la dispozitie. Nu tratezi asta ca pe o lipsa de documentatie "
+        f"('nu exista informatii despre X') — e o granita de confidentialitate, nu o lacuna.\n"
+        f"Nu deschizi NICIODATA raspunsul cu propriul tau salut (Salut/Bună/Hi/Hello etc.), "
+        f"indiferent daca mesajul utilizatorului incepe cu unul — daca era cazul, orchestratorul "
+        f"a atasat deja un salut personalizat inaintea raspunsului tau; un al doilea salut de la "
+        f"tine ar aparea duplicat. Incepi direct cu continutul.\n"
+        f"REGULA CATEGORICA, nu doar o lista de cuvinte interzise: raspunsul tau nu contine, sub "
+        f"NICIO forma si in NICIO formulare — nici in text, nici intr-o nota sau propozitie "
+        f"separata la final — vreo mentiune ca informatia vine dintr-un document, fragment, "
+        f"material intern, sursa, sectiune sau tool. Asta include (dar nu se limiteaza la) fraze "
+        f"gen 'sursa:', 'conform datelor din', 'citare:', 'citat din', 'fragmente din materialele "
+        f"bancii', 'documentul despre', 'sectiunea X', 'get_...'. Daca esti tentat sa adaugi o "
+        f"asemenea nota, nu o adauga deloc — utilizatorul vede doar continutul util, niciodata "
+        f"mecanismul intern prin care a fost obtinut (nivelul de incredere e calculat separat, "
+        f"determinist, nu de tine).\n"
         f"Nu inventezi functionalitati, formate de fisier sau optiuni de ales (CSV/XLSX/JSON etc.) "
         f"pe care aplicatia nu le ofera cu adevarat, si nu mentionezi catre utilizator nume de "
-        f"campuri interne (id-uri, chei tehnice de tool-uri). Daca un tool nu acopera cererea, spui "
-        f"explicit ce nu poti afla — nu propui alternative imaginate.\n"
+        f"campuri interne (id-uri, chei tehnice de tool-uri). Raspunzi DOAR la ce s-a intrebat "
+        f"explicit — daca o parte din INTREBAREA PUSA nu e acoperita de niciun tool sau de baza "
+        f"de cunostinte, spui clar si simplu ca nu poti raspunde la acea parte din lipsa de "
+        f"informatii si recomanzi sa contacteze un operator uman/echipa de suport — fara sa "
+        f"explici de ce nu ai informatia (titlu de sectiune, ce ai cautat etc.). Nu adaugi din "
+        f"proprie initiativa o sectiune care enumera tot ce 'nu e documentat'/'nu este precizat' "
+        f"despre subiect — daca nimeni nu a intrebat acel lucru, nu il mentionezi deloc. Nu propui "
+        f"alternative imaginate.\n"
+        # EXCEPTIE la regula de mai sus, nu o slabire a ei. Regula e scrisa pentru
+        # cunoastere: nu inventa sectiuni despre ce nu scrie in documente. Dar un tool
+        # ca `prepare_credit_application` intoarce `missing` TOCMAI ca modelul sa ceara
+        # datele care lipsesc — e pasul urmator al unei actiuni cerute de om, nu o lacuna
+        # de documentare. Fara randurile astea, regula il trimitea la operatorul uman in
+        # loc sa intrebe „ce venit net ai?" — regresia din df9499d, prinsa abia cand
+        # formularul de credit a incetat sa se mai completeze.
+        f"EXCEPTIE, si singura: cand un tool iti intoarce explicit datele care ii lipsesc "
+        f"ca sa pregateasca un formular pe care utilizatorul TOCMAI a cerut sa il pregatesti "
+        f"(camp 'missing', sau 'ready': false), NU spui ca nu ai informatii si NU trimiti la "
+        f"operator — ceri tu acele date, firesc, in propozitii legate, cate una-doua pe rand, "
+        f"si spui pe scurt la ce iti trebuie. Nu e o lacuna de documentare, e pasul urmator "
+        f"al unei actiuni pe care omul a cerut-o. Ce a primit tool-ul deja nu mai ceri o data.\n"
+        f"Scrii intr-un limbaj natural, cursiv, ca intr-o conversatie reala — nu copiezi formatul "
+        f"brut al fragmentelor regasite (liste numerotate, tabele, titluri de sectiuni). Rescrii "
+        f"pasii sau etapele dintr-un document ca o explicatie fluenta, in propozitii legate intre "
+        f"ele, nu ca o lista mecanica. O lista scurta ramane potrivita doar cand utilizatorul chiar "
+        f"are nevoie sa urmeze pasi separati unul cate unul sau cere explicit o insiruire (ex. ce "
+        f"documente sa pregateasca) — in rest, proza curge mai natural.\n"
         f"{prohibited}\n\n{context.render()}"
     )
 

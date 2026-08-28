@@ -1,12 +1,25 @@
 import { Users } from "lucide-react";
 import { cereAdmin } from "@/lib/admin";
 import { obtineToateConturile } from "@/lib/data/admin-verificari";
-import { obtineStareCarduriToti } from "@/lib/data/admin-tranzactii";
-import type { ProfilAdmin, StareCarduri } from "@/lib/tipuri-admin";
+import { obtineStareConturiToti } from "@/lib/data/admin-tranzactii";
+import type {
+  CerereInchidere,
+  CerereStergere,
+  Poprire,
+  ProfilAdmin,
+  StareConturi,
+} from "@/lib/tipuri-admin";
 import { BackendError } from "@/lib/backend";
 import { Banda } from "@/components/ui/banda";
 import { RestabilesteBiometrie } from "@/components/admin/restabileste-biometrie";
 import { BlocareCont } from "@/components/admin/blocare-cont";
+import { PoprireCont } from "@/components/admin/poprire-cont";
+import { Popriri } from "@/components/admin/popriri";
+import { CereriStergere } from "@/components/admin/cereri-stergere";
+import { CereriInchidere } from "@/components/admin/cereri-inchidere";
+import { obtineCereriStergere } from "@/lib/data/admin-stergeri";
+import { obtineCereriInchidere } from "@/lib/data/admin-inchideri";
+import { obtinePopriri } from "@/lib/data/admin-popriri";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -24,14 +37,41 @@ export default async function ConturiPage() {
   let conturi: ProfilAdmin[] = [];
   let eroare: string | null = null;
 
-  // Starea cardurilor vine separat si nu blocheaza lista: daca ruta cade,
-  // conturile se vad oricum, doar fara butoanele de blocare.
-  let carduri: StareCarduri[] = [];
+  // Starea conturilor vine separat si nu blocheaza lista: daca ruta cade,
+  // lista se vede oricum, doar fara butoanele de blocare.
+  let stariConturi: StareConturi[] = [];
+  // Cozile nu pot darama lista de conturi: daca o ruta cade, restul paginii se
+  // vede la fel. Dar caderea NU se mai inghite in tacere.
+  //
+  // Asa s-a ascuns o functie complet nefunctionala: metodele cozii ajunsesera pe
+  // alta clasa din depozit, ruta raspundea 500, iar `.catch(() => [])` transforma
+  // asta intr-o lista goala. Analistul vedea „nicio cerere" si credea ca nu e
+  // niciuna. O coada goala si o coada care nu s-a putut incarca arata acum diferit.
+  let cereriStergere: CerereStergere[] = [];
+  let cereriInchidere: CerereInchidere[] = [];
+  let popriri: Poprire[] = [];
+  const cozicazute: string[] = [];
+
+  async function incarca<T>(
+    ce: string,
+    promisiune: Promise<T[]>,
+  ): Promise<T[]> {
+    try {
+      return await promisiune;
+    } catch (exc) {
+      console.error(`ERROR incarcare ${ce}:`, exc);
+      cozicazute.push(ce);
+      return [];
+    }
+  }
 
   try {
-    [conturi, carduri] = await Promise.all([
+    [conturi, stariConturi, cereriStergere, cereriInchidere, popriri] = await Promise.all([
       obtineToateConturile(admin.token),
-      obtineStareCarduriToti(admin.token).catch(() => []),
+      incarca("starea conturilor", obtineStareConturiToti(admin.token)),
+      incarca("cererile de închidere a relației", obtineCereriStergere(admin.token)),
+      incarca("cererile de închidere a conturilor", obtineCereriInchidere(admin.token)),
+      incarca("popririle", obtinePopriri(admin.token)),
     ]);
   } catch (exc) {
     eroare =
@@ -47,7 +87,7 @@ export default async function ConturiPage() {
           Toate conturile
         </h1>
         <p className="mt-1.5 text-[15px] leading-[22px] text-ink-soft">
-          Blochează sau deblochează cardurile unui client, ori restabilește manual referința
+          Blochează sau deblochează conturile unui client, ori restabilește manual referința
           biometrică dacă pozele din storage au dispărut.
         </p>
       </div>
@@ -69,21 +109,37 @@ export default async function ConturiPage() {
             <RandCont
               key={cont.id}
               cont={cont}
-              carduri={carduri.find((c) => c.id_utilizator === cont.id) ?? null}
+              stare={stariConturi.find((c) => c.id_utilizator === cont.id) ?? null}
             />
           ))}
         </div>
       ) : null}
+
+      {cozicazute.length > 0 ? (
+        <Banda ton="eroare">
+          Nu am putut încărca {cozicazute.join(" și ")}. Ce vezi mai jos poate fi
+          incomplet — reîncarcă pagina sau verifică backendul.
+        </Banda>
+      ) : null}
+
+      {/* Popririle sunt masuri in curs, nu cereri care asteapta un raspuns —
+          de aceea stau inaintea cozilor. */}
+      <Popriri popriri={popriri} />
+
+      {/* Inchiderea unui cont bancar sta inaintea plecarii din banca: e
+          operatiunea mai deasa, si cea reversibila. */}
+      <CereriInchidere cereri={cereriInchidere} />
+      <CereriStergere cereri={cereriStergere} />
     </div>
   );
 }
 
 function RandCont({
   cont,
-  carduri,
+  stare,
 }: {
   cont: ProfilAdmin;
-  carduri: StareCarduri | null;
+  stare: StareConturi | null;
 }) {
   const eticheta = ETICHETE_STATUS[cont.verification_status] ?? ETICHETE_STATUS.pending;
 
@@ -101,21 +157,24 @@ function RandCont({
           {eticheta.text}
         </span>
 
-        {carduri && carduri.blocate > 0 ? (
+        {stare && stare.blocate > 0 ? (
           <span className="mt-1.5 ml-1.5 inline-block rounded-full bg-danger/10 px-2 py-0.5 text-[11px] font-medium text-danger">
-            Carduri blocate
+            Conturi blocate
           </span>
         ) : null}
       </span>
 
       <span className="flex shrink-0 items-center gap-2">
-        {carduri ? (
+        {stare ? (
           <BlocareCont
             idUtilizator={cont.id}
             nume={cont.nume}
-            total={carduri.total}
-            blocate={carduri.blocate}
+            total={stare.total}
+            blocate={stare.blocate}
           />
+        ) : null}
+        {stare ? (
+          <PoprireCont idUtilizator={cont.id} nume={cont.nume} total={stare.total} />
         ) : null}
         <RestabilesteBiometrie userId={cont.id} nume={cont.nume} />
       </span>

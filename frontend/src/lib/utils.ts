@@ -17,13 +17,17 @@ export function mascheazaCnp(cnp: string) {
   return `${cnp[0]}${"•".repeat(9)}${cnp.slice(-3)}`;
 }
 
-/** 1250.5 -> "1.250,50 RON" (DESIGN.md 11) */
-export function formateazaSuma(suma: number, valuta = "RON") {
-  const numar = new Intl.NumberFormat("ro-RO", {
+/** 1250.5 -> "1.250,50" — fara valuta, pentru cand se afiseaza separat (ex. buton). */
+export function formateazaNumar(suma: number) {
+  return new Intl.NumberFormat("ro-RO", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(suma);
-  return `${numar} ${valuta}`;
+}
+
+/** 1250.5 -> "1.250,50 RON" (DESIGN.md 11) */
+export function formateazaSuma(suma: number, valuta = "RON") {
+  return `${formateazaNumar(suma)} ${valuta}`;
 }
 
 // Fus orar fixat explicit: serverul (container, de regula UTC) si browserul
@@ -42,7 +46,7 @@ export function formateazaOra(data: string | Date) {
 }
 
 /** Ziua calendaristica in Europe/Bucharest, ca sir "AAAA-LL-ZZ" comparabil. */
-function ziISO(data: string | Date) {
+export function ziISO(data: string | Date) {
   return new Date(data).toLocaleDateString("en-CA", { timeZone: FUS_ORAR });
 }
 

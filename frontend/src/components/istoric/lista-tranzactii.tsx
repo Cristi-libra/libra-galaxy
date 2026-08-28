@@ -5,6 +5,7 @@ import { ArrowDownLeft, ArrowUpRight } from "lucide-react";
 import { AvatarProfil } from "@/components/ui/avatar-profil";
 import { Drawer, DrawerContent } from "@/components/ui/drawer";
 import type { TranzactieAfisata } from "@/lib/data/tranzactii";
+import { ETICHETE_STARE, EXPLICATII_STARE } from "@/lib/stare-tranzactie";
 import { cn, etichetaZi, formateazaOra, formateazaSuma } from "@/lib/utils";
 import { FiltreDrawer, type Filtre } from "@/components/istoric/filtre-drawer";
 
@@ -81,7 +82,17 @@ export function ListaTranzactii({ tranzactii }: { tranzactii: TranzactieAfisata[
         }}
       >
         <DrawerContent
-          title={selectata ? (selectata.tip === "primita" ? "Bani primiți" : "Bani trimiși") : ""}
+          title={
+            selectata
+              ? selectata.status === "flagged"
+                ? "Transfer în verificare"
+                : selectata.status === "anulata"
+                  ? "Transfer anulat"
+                  : selectata.tip === "primita"
+                    ? "Bani primiți"
+                    : "Bani trimiși"
+              : ""
+          }
           description={selectata?.descriere || "Transfer între conturi Galaxy Bank."}
         >
           {selectata ? <DetaliuTranzactie tranzactie={selectata} /> : null}
@@ -102,7 +113,9 @@ function RandTranzactie({
 }) {
   const primita = tranzactie.tip === "primita";
   const Icoana = primita ? ArrowDownLeft : ArrowUpRight;
-  const nume = tranzactie.contraparte?.nume ?? "Cont Galaxy Bank";
+  const nume = tranzactie.numeContraparte;
+  const stare = ETICHETE_STARE[tranzactie.status];
+  const anulata = tranzactie.status === "anulata";
 
   return (
     <button
@@ -133,15 +146,27 @@ function RandTranzactie({
       </span>
 
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[15px] text-ink">
-          {tranzactie.intreConturiProprii ? (
-            "Între conturile tale"
-          ) : (
-            <>
-              {primita ? "Primit de la" : "Trimis către"}{" "}
-              <span className="font-semibold">{nume}</span>
-            </>
-          )}
+        <span className="flex items-center gap-2 truncate text-[15px] text-ink">
+          <span className="truncate">
+            {tranzactie.intreConturiProprii ? (
+              "Între conturile tale"
+            ) : (
+              <>
+                {primita ? "Primit de la" : anulata ? "Anulat către" : "Trimis către"}{" "}
+                <span className="font-semibold">{nume}</span>
+              </>
+            )}
+          </span>
+          {stare ? (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                stare.stil,
+              )}
+            >
+              {stare.text}
+            </span>
+          ) : null}
         </span>
         <span className="block truncate text-[12.5px] text-ink-faint">
           {/* Banii au plecat din punga comuna, nu din contul tau — se spune. */}
@@ -156,7 +181,8 @@ function RandTranzactie({
       <span
         className={cn(
           "tabular shrink-0 text-[15px] font-semibold",
-          primita ? "text-success" : "text-ink",
+          // Suma anulata s-a intors in cont: se taie, ca sa nu para o iesire.
+          anulata ? "text-ink-faint line-through" : primita ? "text-success" : "text-ink",
         )}
       >
         {primita ? "+" : "−"} {formateazaSuma(tranzactie.suma, tranzactie.valuta)}
@@ -167,7 +193,7 @@ function RandTranzactie({
 
 function DetaliuTranzactie({ tranzactie }: { tranzactie: TranzactieAfisata }) {
   const primita = tranzactie.tip === "primita";
-  const nume = tranzactie.contraparte?.nume ?? "Cont Galaxy Bank";
+  const nume = tranzactie.numeContraparte;
 
   return (
     <div className="flex flex-col gap-4">
@@ -183,7 +209,11 @@ function DetaliuTranzactie({ tranzactie }: { tranzactie: TranzactieAfisata }) {
         <span
           className={cn(
             "tabular text-[32px] font-bold leading-[38px]",
-            primita ? "text-success" : "text-ink",
+            tranzactie.status === "anulata"
+              ? "text-ink-faint line-through"
+              : primita
+                ? "text-success"
+                : "text-ink",
           )}
         >
           {primita ? "+" : "−"} {formateazaSuma(tranzactie.suma, tranzactie.valuta)}
@@ -193,12 +223,57 @@ function DetaliuTranzactie({ tranzactie }: { tranzactie: TranzactieAfisata }) {
             ? "Mutare între conturile tale"
             : primita
               ? `Primit de la ${nume}`
-              : `Trimis către ${nume}`}
+              : tranzactie.status === "anulata"
+                ? `Anulat către ${nume}`
+                : `Trimis către ${nume}`}
         </span>
       </div>
 
+      {EXPLICATII_STARE[tranzactie.status] ? (
+        <p
+          className={cn(
+            "rounded-field px-4 py-3 text-[13px] leading-[18px]",
+            ETICHETE_STARE[tranzactie.status]?.stil,
+          )}
+        >
+          {EXPLICATII_STARE[tranzactie.status]}
+        </p>
+      ) : null}
+
       <div>
-        <Rand eticheta={primita ? "Expeditor" : "Beneficiar"} valoare={nume} />
+        {/*
+          La o mutare intre conturile proprii, „Expeditor: tu / Beneficiar: tu"
+          nu spune nimic — singura informatie reala a miscarii sunt cele doua
+          conturi. E si cazul consolidarii dinaintea inchiderii contului
+          (migratia 0037), unde omul chiar vrea sa vada de unde in ce s-au strans
+          banii.
+        */}
+        {tranzactie.intreConturiProprii ? (
+          <>
+            {tranzactie.numeContPropriu ? (
+              <Rand eticheta="Din contul" valoare={tranzactie.numeContPropriu} />
+            ) : null}
+            {tranzactie.numeContCelalalt ? (
+              <Rand eticheta="În contul" valoare={tranzactie.numeContCelalalt} />
+            ) : null}
+          </>
+        ) : (
+          <>
+            <Rand eticheta={primita ? "Expeditor" : "Beneficiar"} valoare={nume} />
+            {/*
+              Din ce buzunar al tau au plecat banii, sau in care au intrat. De
+              cand un om poate avea mai multe conturi, numele contrapartii
+              singur nu mai spune povestea intreaga. Doar in detaliu, nu pe rand:
+              randul din lista are deja nume, descriere si grup pe 440px.
+            */}
+            {tranzactie.numeContPropriu ? (
+              <Rand
+                eticheta={primita ? "În contul" : "Din contul"}
+                valoare={tranzactie.numeContPropriu}
+              />
+            ) : null}
+          </>
+        )}
         {tranzactie.grup?.directie === "din" ? (
           <Rand eticheta="Sursă" valoare={`Grupul ${tranzactie.grup.nume}`} />
         ) : null}

@@ -23,12 +23,19 @@ function audioDinBase64(base64: string): string {
 export function FereastraChat({
   conversatieIdInitial,
   mesajeInitiale,
+  intrebareInitiala = "",
 }: {
   conversatieIdInitial: string | null;
   mesajeInitiale: MesajAsistent[];
+  /**
+   * Text pus in casuta la deschidere, venit din `?intrebare=` — de exemplu
+   * cand omul apasa "Intreaba asistentul" pe o notificare de blocare. Se
+   * pre-completeaza si atat: trimiterea ramane a lui.
+   */
+  intrebareInitiala?: string;
 }) {
   const router = useRouter();
-  const [continut, setContinut] = useState("");
+  const [continut, setContinut] = useState(intrebareInitiala);
   const [atasament, setAtasament] = useState<Atasament | null>(null);
   const [mesajOptimist, setMesajOptimist] = useState<MesajAsistent | null>(null);
   const [seIncarcaFisier, setSeIncarcaFisier] = useState(false);
@@ -68,7 +75,7 @@ export function FereastraChat({
 
   function trimite() {
     const text = continut.trim();
-    if (!text) return;
+    if (!text && !atasament) return;
 
     const atasamentTrimis = atasament;
 
@@ -81,7 +88,9 @@ export function FereastraChat({
     setMesajOptimist({
       id: `optimist-${Date.now()}`,
       rol: "user",
-      text,
+      // Un atasament trimis fara text n-ar arata nimic in bula proprie —
+      // numele fisierului tine loc de continut pana vine raspunsul.
+      text: text || (atasamentTrimis ? `📎 ${atasamentTrimis.nume}` : ""),
       citari: [],
       nivelIncredere: null,
       canal: "text",
@@ -330,7 +339,7 @@ export function FereastraChat({
           className="max-h-32 min-h-[52px] flex-1 resize-none rounded-field border border-line bg-surface px-4 py-[15px] text-[15px] text-ink outline-none transition-[border-color,box-shadow] duration-150 ease-soft placeholder:text-ink-faint focus:border-primary-500 focus:ring-4 focus:ring-primary-500/12 disabled:opacity-60"
         />
 
-        {continut.trim() ? (
+        {continut.trim() || atasament ? (
           <button
             type="submit"
             aria-label="Trimite mesajul"

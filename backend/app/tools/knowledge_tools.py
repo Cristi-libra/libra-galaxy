@@ -11,7 +11,15 @@ def build_knowledge_tools(retrieval_service: RetrievalService) -> list[ToolDefin
         if not query:
             return {"hits": []}
 
-        profile = RetrievalProfile(languages=[principal.locale] if principal.locale else None)
+        # categorie_hint vine de la agent (SelectedTool.args), calculat determinist
+        # din intentia clasificata — NU de la model — ca sa nu inguste cautarea pe
+        # baza unei presupuneri a LLM-ului. Momentan setat doar pentru
+        # credit_intent (vezi document_intelligence.py::select_tools).
+        categorie_hint = args.get("categorie_hint")
+        profile = RetrievalProfile(
+            languages=[principal.locale] if principal.locale else None,
+            categories=[categorie_hint] if categorie_hint else None,
+        )
         hits = await retrieval_service.search(query, profile)
 
         return {
@@ -31,7 +39,16 @@ def build_knowledge_tools(retrieval_service: RetrievalService) -> list[ToolDefin
             name="search_bank_knowledge",
             description="Cauta in baza de cunostinte a bancii (politici, produse, proceduri, FAQ).",
             callback=search_bank_knowledge,
-            allowed_agents=frozenset({"document_intelligence"}),
+            # `credit_advisor`: de cand `credit_intent` se ruteaza acolo
+            # (specs.py), el primeste si intrebarile despre conditiile
+            # produsului, nu doar despre dosarul omului.
+            # `transaction_intelligence`: pe traseul "cont blocat" are nevoie de
+            # numarul de telefon potrivit si de pasii oficiali de escaladare.
+            # Fara randurile astea executorul le-ar filtra tacit tool-ul, si
+            # agentii ar parea ca „nu stiu" ce scrie in propria documentatie.
+            allowed_agents=frozenset({
+                "document_intelligence", "credit_advisor", "transaction_intelligence",
+            }),
             required_permissions=frozenset({PERMISSION_ASSISTANT_USE}),
             side_effect=SideEffect.READ_ONLY,
             risk_level=RiskLevel.LOW,
